@@ -114,8 +114,11 @@ print(b.name) # 포메
 print(a.count) # 0
 print(b.count) # 0
 
-Dog.count = 1
+Dog.count = 1 # 클래스 변수 변경
 
-print(a.count) # 0
-print(b.count) # 0
+# 클래스 변수 변경 시 모든 인스턴스가 변경 사항을 공유한다.
+print(a.count) # 1
+print(b.count) # 1
+
+
 
