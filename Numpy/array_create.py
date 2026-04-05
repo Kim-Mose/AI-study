@@ -45,7 +45,7 @@ print(arr, type(arr))
 #  [0. 1. 0.]
 #  [0. 0. 1.]] <class 'numpy.ndarray'>
 
-# random.randn : 표준정규분포에서 랜던 값을 뽑아 배열 생성
+# random.randn : 표준정규분포에서 랜덤 값을 뽑아 배열 생성
 arr = np.random.randn(3)
 print(arr, type(arr)) # [1.40446345 0.69415222 0.47656816] <class 'numpy.ndarray'>
 
