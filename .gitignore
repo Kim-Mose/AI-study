@@ -1,0 +1,28 @@
+# Data folders
+**/data/
+**/data
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Mac
+.DS_Store
+
+# Virtual envs
+venv/
+.venv/
+.jupyter/
+
+# Generated files
+*.npy
+*.npz
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights (재학습 가능)
+*.pth
+*.pt
