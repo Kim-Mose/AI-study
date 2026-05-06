@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -5,14 +9,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 from model import VGG
-
-
-def get_device():
-    return torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+from utils import get_device, ResultLogger
 
 
 def train(model, loader, criterion, optimizer, device):
@@ -49,9 +46,15 @@ def main():
     device = get_device()
     print(f"Device: {device}")
 
-    BATCH_SIZE = 64
-    EPOCHS = 20
-    LR = 0.001
+    config = {
+        "model": "VGG16",
+        "dataset": "CIFAR-10 (224x224 resize)",
+        "batch_size": 64,
+        "epochs": 20,
+        "learning_rate": 0.001,
+        "optimizer": "Adam",
+        "device": str(device),
+    }
 
     transform = transforms.Compose([
         transforms.Resize(224),
@@ -62,20 +65,31 @@ def main():
     train_dataset = datasets.CIFAR10(root="./data", train=True, download=True, transform=transform)
     test_dataset = datasets.CIFAR10(root="./data", train=False, download=True, transform=transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=config["batch_size"], shuffle=False)
 
     model = VGG("VGG16", num_classes=10).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LR)
+    optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
 
-    for epoch in range(1, EPOCHS + 1):
+    logger = ResultLogger(results_dir="results", model_name="VGG16")
+
+    for epoch in range(1, config["epochs"] + 1):
         train_loss, train_acc = train(model, train_loader, criterion, optimizer, device)
         test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+
+        logger.log(
+            epoch=epoch,
+            train_loss=train_loss,
+            train_acc=train_acc,
+            test_loss=test_loss,
+            test_acc=test_acc,
+        )
+
         print(f"Epoch {epoch:2d} | Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
               f"Test Loss: {test_loss:.4f} Acc: {test_acc:.4f}")
 
-    torch.save(model.state_dict(), "vgg16.pth")
+    logger.save_all(model=model, config=config)
 
 
 if __name__ == "__main__":

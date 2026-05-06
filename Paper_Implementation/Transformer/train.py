@@ -1,49 +1,71 @@
 """
-Transformer 학습 코드 템플릿
-실제로는 번역 데이터셋(예: WMT, IWSLT)이 필요하다.
+Transformer 학습 코드 + 합성 데이터 데모
 
-여기서는 학습 루프 구조만 보여준다.
-실제 사용 시에는 데이터 로더와 토크나이저를 연결해야 한다.
+실제 번역 데이터셋(WMT, IWSLT 등) 없이도 모델 학습이 동작하는지
+확인할 수 있도록 합성 시퀀스 reverse task로 데모 학습 수행.
+
+Task: 입력 시퀀스를 뒤집어 출력하는 task
+예) [1, 2, 3, 4] -> [4, 3, 2, 1]
 """
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 
 from model import Transformer
+from utils import get_device, ResultLogger
 
 
-def get_device():
-    return torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+PAD_IDX = 0
+BOS_IDX = 1
+EOS_IDX = 2
 
 
-def make_pad_mask(seq, pad_idx=0):
-    """패딩 마스크 생성"""
+class ReverseDataset(Dataset):
+    """시퀀스 뒤집기 task용 합성 데이터"""
+    def __init__(self, num_samples=2000, vocab_size=20, seq_len=8):
+        self.num_samples = num_samples
+        self.vocab_size = vocab_size
+        self.seq_len = seq_len
+        torch.manual_seed(42)
+        self.data = []
+        for _ in range(num_samples):
+            src = torch.randint(3, vocab_size, (seq_len,))  # 0,1,2는 special tokens
+            tgt = torch.cat([torch.tensor([BOS_IDX]), src.flip(0), torch.tensor([EOS_IDX])])
+            self.data.append((src, tgt))
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+
+def make_pad_mask(seq, pad_idx=PAD_IDX):
     return (seq != pad_idx).unsqueeze(1).unsqueeze(2)
 
 
 def make_subsequent_mask(seq):
-    """디코더에서 미래 토큰 마스킹"""
     seq_len = seq.size(1)
     mask = torch.tril(torch.ones(seq_len, seq_len)).bool()
     return mask.unsqueeze(0).unsqueeze(0)
 
 
-def train_epoch(model, loader, criterion, optimizer, device, pad_idx=0):
+def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    total_loss = 0
+    total_loss, correct, total = 0, 0, 0
+
     for src, tgt in loader:
         src, tgt = src.to(device), tgt.to(device)
-
-        # 디코더 입력은 마지막 토큰 제외, 정답은 첫 토큰 제외
         tgt_in = tgt[:, :-1]
         tgt_out = tgt[:, 1:]
 
-        src_mask = make_pad_mask(src, pad_idx).to(device)
-        tgt_mask = (make_pad_mask(tgt_in, pad_idx) & make_subsequent_mask(tgt_in).to(device))
+        src_mask = make_pad_mask(src).to(device)
+        tgt_mask = (make_pad_mask(tgt_in) & make_subsequent_mask(tgt_in).to(device))
 
         pred = model(src, tgt_in, src_mask, tgt_mask)
         loss = criterion(pred.reshape(-1, pred.size(-1)), tgt_out.reshape(-1))
@@ -51,35 +73,56 @@ def train_epoch(model, loader, criterion, optimizer, device, pad_idx=0):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
         total_loss += loss.item()
-    return total_loss / len(loader)
+        correct += (pred.argmax(-1) == tgt_out).sum().item()
+        total += tgt_out.numel()
+
+    return total_loss / len(loader), correct / total
 
 
 def main():
     device = get_device()
     print(f"Device: {device}")
 
-    SRC_VOCAB_SIZE = 10000
-    TGT_VOCAB_SIZE = 10000
-    EPOCHS = 20
-    LR = 0.0001
-    PAD_IDX = 0
+    config = {
+        "model": "Transformer (small)",
+        "task": "Sequence Reverse (synthetic)",
+        "vocab_size": 20,
+        "d_model": 64,
+        "heads": 4,
+        "layers": 2,
+        "d_ff": 128,
+        "batch_size": 32,
+        "epochs": 20,
+        "learning_rate": 0.0005,
+        "device": str(device),
+    }
+
+    train_dataset = ReverseDataset(num_samples=2000, vocab_size=20, seq_len=8)
+    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
 
     model = Transformer(
-        src_vocab_size=SRC_VOCAB_SIZE,
-        tgt_vocab_size=TGT_VOCAB_SIZE,
+        src_vocab_size=20,
+        tgt_vocab_size=20,
+        d_model=64,
+        num_heads=4,
+        num_layers=2,
+        d_ff=128,
     ).to(device)
 
     criterion = nn.CrossEntropyLoss(ignore_index=PAD_IDX)
-    optimizer = optim.Adam(model.parameters(), lr=LR, betas=(0.9, 0.98), eps=1e-9)
+    optimizer = optim.Adam(model.parameters(), lr=config["learning_rate"])
 
-    # 실제 데이터 로더 연결 필요
-    # train_loader = DataLoader(...)
-    # for epoch in range(1, EPOCHS + 1):
-    #     loss = train_epoch(model, train_loader, criterion, optimizer, device, PAD_IDX)
-    #     print(f"Epoch {epoch} | Loss: {loss:.4f}")
+    logger = ResultLogger(results_dir="results", model_name="Transformer")
 
-    print("Transformer 모델 정의 완료. 데이터셋 연결 필요.")
+    for epoch in range(1, config["epochs"] + 1):
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+        logger.log(epoch=epoch, train_loss=train_loss, train_acc=train_acc)
+        print(f"Epoch {epoch:2d} | Loss: {train_loss:.4f} | Acc: {train_acc:.4f}")
+
+    logger.save_all(model=model, config=config)
+    print("\n실제 번역 task는 IWSLT/WMT 데이터셋 + 토크나이저 필요.")
 
 
 if __name__ == "__main__":

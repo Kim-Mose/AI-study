@@ -1,60 +1,127 @@
 """
-BERT 학습 코드 템플릿
-BERT는 두 가지 task로 사전학습된다.
+BERT 학습 데모
 
-1. MLM (Masked Language Model): 일부 토큰을 [MASK]로 가리고 예측
-2. NSP (Next Sentence Prediction): 두 문장이 연속된 문장인지 분류
+작은 합성 데이터로 MLM(Masked Language Model) 사전학습 데모를 수행한다.
+실제 사전학습은 위키피디아/BookCorpus 같은 대용량 데이터 + 며칠 학습 필요.
 
-실제 사전학습은 데이터/시간이 매우 많이 필요해서
-보통 사전학습된 모델(huggingface transformers)을 가져와서 fine-tuning한다.
+실무에서는 huggingface transformers의 사전학습된 BERT를 가져와 fine-tuning하는 게 일반적.
 """
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
 
-from model import BERT, BERTForMLM, BERTForNSP
+from model import BERT, BERTForMLM
+from utils import get_device, ResultLogger
 
 
-def get_device():
-    return torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
+VOCAB_SIZE = 100
+PAD_IDX = 0
+MASK_IDX = 1
+SPECIAL_TOKENS = 2  # 0=PAD, 1=MASK
+
+
+class MLMDataset(Dataset):
+    """MLM용 합성 데이터: 무작위 토큰 시퀀스 + 15% 마스킹"""
+    def __init__(self, num_samples=1000, seq_len=20, vocab_size=VOCAB_SIZE):
+        self.num_samples = num_samples
+        self.seq_len = seq_len
+        self.vocab_size = vocab_size
+        torch.manual_seed(42)
+        self.data = []
+        for _ in range(num_samples):
+            tokens = torch.randint(SPECIAL_TOKENS, vocab_size, (seq_len,))
+            self.data.append(tokens)
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        tokens = self.data[idx].clone()
+        labels = torch.full_like(tokens, -100)  # -100은 loss 계산 시 무시
+
+        # 15% 마스킹
+        mask_prob = torch.rand(tokens.size())
+        mask = mask_prob < 0.15
+        labels[mask] = tokens[mask]
+        tokens[mask] = MASK_IDX
+
+        segment = torch.zeros_like(tokens)
+        return tokens, segment, labels
+
+
+def train_epoch(model, loader, criterion, optimizer, device):
+    model.train()
+    total_loss, correct, total = 0, 0, 0
+
+    for tokens, segment, labels in loader:
+        tokens, segment, labels = tokens.to(device), segment.to(device), labels.to(device)
+
+        pred = model(tokens, segment)
+        loss = criterion(pred.reshape(-1, pred.size(-1)), labels.reshape(-1))
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        # 마스킹된 위치만 정확도 계산
+        mask_positions = labels != -100
+        correct += (pred.argmax(-1)[mask_positions] == labels[mask_positions]).sum().item()
+        total += mask_positions.sum().item()
+
+    return total_loss / len(loader), correct / total if total > 0 else 0
 
 
 def main():
     device = get_device()
     print(f"Device: {device}")
 
-    VOCAB_SIZE = 30000
-    EPOCHS = 10
-    LR = 1e-4
+    config = {
+        "model": "BERT (mini)",
+        "task": "MLM 사전학습 (synthetic)",
+        "vocab_size": VOCAB_SIZE,
+        "d_model": 64,
+        "heads": 4,
+        "layers": 2,
+        "d_ff": 128,
+        "max_len": 20,
+        "batch_size": 32,
+        "epochs": 20,
+        "learning_rate": 0.001,
+        "device": str(device),
+    }
 
-    # 작은 BERT (실험용)
+    train_dataset = MLMDataset(num_samples=1000, seq_len=20, vocab_size=VOCAB_SIZE)
+    train_loader = DataLoader(train_dataset, batch_size=config["batch_size"], shuffle=True)
+
     bert = BERT(
         vocab_size=VOCAB_SIZE,
-        d_model=128,
+        d_model=64,
         num_heads=4,
         num_layers=2,
-        d_ff=512,
+        d_ff=128,
+        max_len=20,
     ).to(device)
 
-    mlm_model = BERTForMLM(bert, VOCAB_SIZE, d_model=128).to(device)
-    nsp_model = BERTForNSP(bert, d_model=128).to(device)
+    mlm_model = BERTForMLM(bert, VOCAB_SIZE, d_model=64).to(device)
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    optimizer = optim.Adam(mlm_model.parameters(), lr=config["learning_rate"])
 
-    mlm_criterion = nn.CrossEntropyLoss(ignore_index=-100)
-    nsp_criterion = nn.CrossEntropyLoss()
+    logger = ResultLogger(results_dir="results", model_name="BERT_mini")
 
-    optimizer = optim.Adam(bert.parameters(), lr=LR)
+    for epoch in range(1, config["epochs"] + 1):
+        train_loss, train_acc = train_epoch(mlm_model, train_loader, criterion, optimizer, device)
+        logger.log(epoch=epoch, train_loss=train_loss, train_acc=train_acc)
+        print(f"Epoch {epoch:2d} | MLM Loss: {train_loss:.4f} | Acc: {train_acc:.4f}")
 
-    # 실제 데이터로 사전학습 또는 fine-tuning
-    # for epoch in range(EPOCHS):
-    #     for batch in train_loader:
-    #         ...
-
-    print("BERT 모델 정의 완료. 사전학습된 모델을 사용하거나 데이터셋 연결이 필요하다.")
-    print("실무에서는 huggingface transformers 라이브러리 사용 권장")
+    logger.save_all(model=mlm_model, config=config)
+    print("\n실제 사전학습은 큰 코퍼스 + 며칠 학습 필요.")
+    print("실무에서는 huggingface transformers 권장.")
 
 
 if __name__ == "__main__":
